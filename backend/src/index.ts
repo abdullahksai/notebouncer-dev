@@ -42,7 +42,9 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ error: "internal_error" });
 });
 
-app.listen(env.PORT, () => {
+// Bind to 0.0.0.0 so platforms like Railway / Fly / Render can route traffic
+// in. Without this, Node 17+ binds IPv6-only by default and the proxy gets 502s.
+app.listen(env.PORT, "0.0.0.0", () => {
   console.log(`NoteBouncer backend listening on :${env.PORT}`);
   console.log(`  Frontend origin: ${env.FRONTEND_URL}`);
   console.log(`  OAuth redirect:  ${env.ZOOM_REDIRECT_URI}`);
