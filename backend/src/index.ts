@@ -14,11 +14,15 @@ import { dashboardRouter } from "./api/dashboard";
 
 const app = express();
 
-// Permissive CORS for the configured frontend origin. Webhook + OAuth are
-// browser-driven top-level navigations, not XHR — they don't need CORS.
+// CORS. The Zoom in-client browser sometimes sends Origin values that don't
+// match the frontend's public URL exactly, which would cause `origin: FRONTEND_URL`
+// to reject the response. Reflecting any origin keeps the sidebar working;
+// tighten with an allow-list once we know the exact Zoom-injected origin.
+// Webhook + OAuth are browser-driven top-level navigations, not XHR — they
+// don't need CORS.
 app.use(
   cors({
-    origin: env.FRONTEND_URL,
+    origin: true,
     credentials: true,
   })
 );
