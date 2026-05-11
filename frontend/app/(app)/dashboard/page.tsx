@@ -1,18 +1,19 @@
-import { prisma } from "@/lib/infra/db";
+// Dashboard server component.
+//
+// Fetches the pre-computed payload from the backend on each render (RSC
+// `cache: 'no-store'`) and hands serializable shapes to the activity card
+// client component. No Prisma, no dedup/insights compute here — that all
+// lives on the backend now.
+
 import { Icon } from "@/components/ui/Icon";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { SectionLabel } from "@/components/ui/SectionLabel";
 import { BrandMark } from "@/components/ui/BrandMark";
 import { Avatar } from "@/components/ui/Avatar";
-import { ActivityCard, ActivityRow } from "./IncidentActivityCard";
-import { generateInsight } from "@/lib/domain/insights";
-import {
-  dedupIncidents,
-  countByAction,
-  groupByMeeting,
-  type MeetingSummary,
-} from "@/lib/domain/dedup";
+import { ActivityCard } from "./IncidentActivityCard";
 import { COPY } from "@/lib/copy";
+import { fetchDashboard } from "@/lib/api";
+import type { DashboardCounts, HostForClient } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -21,60 +22,11 @@ export default async function HostDashboardPage({
 }: {
   searchParams: { installed?: string };
 }) {
-  const [users, allLogs, last48hLogs] = await Promise.all([
-    prisma.user.findMany({
-      where: { deauthorizedAt: null },
-      orderBy: { installedAt: "desc" },
-    }),
-    // Sidebar-only view: webhook rows are kept in the database for future use
-    // (analytics, alerts, etc.) but hidden from the user-facing dashboard so
-    // each bot incident is reported once, from the source that can act on it.
-    prisma.auditLog.findMany({
-      where: { source: "sidebar" },
-      orderBy: { createdAt: "desc" },
-      take: 1000,
-    }),
-    prisma.auditLog.findMany({
-      where: {
-        source: "sidebar",
-        createdAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) },
-      },
-    }),
-  ]);
+  const data = await fetchDashboard();
+  const { hosts, rows, meetings, counts, monthIncidentCount, last48hCount, insight } =
+    data;
 
-  const allIncidents = dedupIncidents(allLogs);
-  const meetingSummaries = groupByMeeting(allIncidents);
-
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const weekIncidents = allIncidents.filter(
-    (i) => i.earliestAt >= sevenDaysAgo
-  );
-  const monthStart = new Date(
-    new Date().getFullYear(),
-    new Date().getMonth(),
-    1
-  );
-  const monthIncidents = allIncidents.filter(
-    (i) => i.earliestAt >= monthStart
-  );
-
-  const total = countByAction(allIncidents);
-  const week = countByAction(weekIncidents);
-  const last48hCount = last48hLogs.length;
-
-  const insight = generateInsight(
-    allLogs.map((l) => ({
-      participantName: l.participantName,
-      matchReason: l.matchReason,
-      action: l.action,
-      latencyMs: l.latencyMs,
-      source: l.source,
-      errorMessage: l.errorMessage,
-      createdAt: l.createdAt,
-    }))
-  );
-
-  const heroNum = monthIncidents.length;
+  const heroNum = monthIncidentCount;
   const heroStat = `${heroNum} ${
     heroNum === 1 ? COPY.dashHeroSuffix : COPY.dashHeroSuffixPlural
   }`;
@@ -83,39 +35,8 @@ export default async function HostDashboardPage({
       ? COPY.dashHeroQuietSub
       : `${heroNum} bot incident${heroNum === 1 ? "" : "s"} caught this month.`;
 
-  const primaryHost = users[0];
+  const primaryHost = hosts[0];
   const hostFirstName = primaryHost?.displayName?.split(" ")[0] ?? "Host";
-
-  // Convert deduped incidents to rows for the activity card
-  const rows: ActivityRow[] = allIncidents.slice(0, 200).map((i) => ({
-    id: i.id,
-    meetingId: i.meetingId,
-    whenISO: i.earliestAt.toISOString(),
-    name: i.participantName,
-    email: i.participantEmail,
-    reason: i.matchReason,
-    action: i.action,
-    latency: i.latencyMs,
-    error: i.errorMessage,
-    cycles: i.cycles,
-  }));
-
-  // Serializable meeting summary for the client component
-  const meetingsForClient = meetingSummaries.slice(0, 100).map((m) => ({
-    meetingId: m.meetingId,
-    earliestISO: m.earliestAt.toISOString(),
-    latestISO: m.latestAt.toISOString(),
-    counts: m.counts,
-    incidents: m.incidents.map((i) => ({
-      id: i.id,
-      whenISO: i.earliestAt.toISOString(),
-      name: i.participantName,
-      reason: i.matchReason,
-      action: i.action,
-      latency: i.latencyMs,
-      cycles: i.cycles,
-    })),
-  }));
 
   return (
     <main
@@ -150,13 +71,13 @@ export default async function HostDashboardPage({
 
           <div>
             <SectionLabel>System intelligence</SectionLabel>
-            <StatsCard total={total} week={week} />
+            <StatsCard total={counts.total} week={counts.week} />
           </div>
 
-          {users.length > 0 ? (
+          {hosts.length > 0 ? (
             <div>
               <SectionLabel>Operations</SectionLabel>
-              <HostsCard users={users} />
+              <HostsCard hosts={hosts} />
             </div>
           ) : (
             <div>
@@ -167,7 +88,7 @@ export default async function HostDashboardPage({
 
           <div>
             <SectionLabel>Activity log</SectionLabel>
-            <ActivityCard rows={rows} meetings={meetingsForClient} />
+            <ActivityCard rows={rows} meetings={meetings} />
           </div>
         </div>
       </div>
@@ -316,8 +237,8 @@ function StatsCard({
   total,
   week,
 }: {
-  total: { total: number; detected: number; removed: number; waiting: number; failed: number; detectedOnly: number };
-  week: { total: number; detected: number; removed: number; waiting: number; failed: number; detectedOnly: number };
+  total: DashboardCounts;
+  week: DashboardCounts;
 }) {
   const stats = [
     {
@@ -428,15 +349,7 @@ function signed(n: number): string {
   return String(n);
 }
 
-function HostsCard({
-  users,
-}: {
-  users: Array<{
-    displayName: string | null;
-    email: string;
-    installedAt: Date;
-  }>;
-}) {
+function HostsCard({ hosts }: { hosts: HostForClient[] }) {
   return (
     <div className="glass-card" style={{ padding: 24 }}>
       <div className="mb-4">
@@ -451,7 +364,7 @@ function HostsCard({
         </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-3.5">
-        {users.map((u) => (
+        {hosts.map((u) => (
           <div
             key={u.email}
             className="white-card flex items-center gap-3.5"
@@ -479,7 +392,7 @@ function HostsCard({
               className="text-right hidden sm:block"
               style={{ fontSize: 11, color: "var(--ink-500)" }}
             >
-              <div>since {u.installedAt.toISOString().slice(0, 10)}</div>
+              <div>since {u.installedAtISO.slice(0, 10)}</div>
             </div>
           </div>
         ))}

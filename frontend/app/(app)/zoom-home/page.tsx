@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { detect, DetectionConfig, DEFAULT_CONFIG } from "@/lib/domain/detection";
 import { Icon } from "@/components/ui/Icon";
 import { StatusPill } from "@/components/ui/StatusPill";
 import { COPY, humanizeError, humanizeErrorShort } from "@/lib/copy";
+import { detectParticipant as apiDetect, getSidebarConfig, postSidebarEvent } from "@/lib/api";
+import type { SidebarEventRequest } from "@/lib/types";
 
 type Status =
   | { kind: "loading" }
@@ -50,7 +51,8 @@ export default function ZoomSidebarApp() {
   const [bulkRunning, setBulkRunning] = useState(false);
   const [actionMode, setActionMode] = useState<ActionMode>("remove");
   const [waitingRoomEnabled, setWaitingRoomEnabled] = useState<boolean | null>(null);
-  const [config] = useState<DetectionConfig>(DEFAULT_CONFIG);
+  const enabledRef = useRef<boolean>(true);
+  const dryRunRef = useRef<boolean>(false);
   const userIdRef = useRef<string | null>(null);
   const sdkRef = useRef<any>(null);
   const meetingIdRef = useRef<string>("");
@@ -165,26 +167,18 @@ export default function ZoomSidebarApp() {
     participantEmail?: string;
     participantZoomId?: string;
     matchReason: string;
-    action: "detected" | "removed" | "moved_to_waiting_room" | "remove_failed";
+    action: SidebarEventRequest["action"];
     errorMessage?: string;
     latencyMs?: number;
   }) {
     if (!meetingIdRef.current) return;
     try {
-      const res = await fetch("/api/sidebar/event", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          zoomUserId: userIdRef.current,
-          meetingId: meetingIdRef.current,
-          meetingUuid: meetingUuidRef.current || undefined,
-          ...payload,
-        }),
+      await postSidebarEvent({
+        zoomUserId: userIdRef.current ?? undefined,
+        meetingId: meetingIdRef.current,
+        meetingUuid: meetingUuidRef.current || undefined,
+        ...payload,
       });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        appendLog("warn", `Sync HTTP ${res.status}: ${errText.slice(0, 100)}`);
-      }
     } catch (err) {
       appendLog("warn", `Sync failed: ${(err as Error).message}`);
     }
@@ -239,11 +233,18 @@ export default function ZoomSidebarApp() {
       return;
     }
 
-    const result = detect(
-      { name, email, zoomUserId: uuid, isGuest: !email },
-      config
-    );
+    let result;
+    try {
+      result = await apiDetect({ name, email, zoomUserId: uuid, isGuest: !email });
+    } catch (err) {
+      appendLog("warn", `Detect API failed for ${name}: ${(err as Error).message}`);
+      return;
+    }
     if (!result.match) return;
+    if (!enabledRef.current) {
+      appendLog("info", `Detection disabled — would have flagged ${name} (${result.reason})`);
+      return;
+    }
 
     detectedUUIDsRef.current.add(uuid);
     appendLog("warn", `Bot detected: ${name} (${result.reason})`);
@@ -473,6 +474,20 @@ export default function ZoomSidebarApp() {
         });
         if (cancelled) return;
         appendLog("info", "Zoom SDK configured");
+
+        // Load per-host sidebar config (enabled / dryRun). Non-fatal on failure
+        // — the sidebar falls back to its default enabled=true / dryRun=false.
+        try {
+          const cfg = await getSidebarConfig();
+          enabledRef.current = cfg.enabled;
+          dryRunRef.current = cfg.dryRun;
+          appendLog(
+            "info",
+            `Config: enabled=${cfg.enabled} dryRun=${cfg.dryRun}`
+          );
+        } catch (err: any) {
+          appendLog("warn", `Couldn't load config: ${err?.message ?? err}`);
+        }
 
         const ctx = await zoomSdk.getRunningContext();
         appendLog("info", `Running context: ${ctx.context}`);

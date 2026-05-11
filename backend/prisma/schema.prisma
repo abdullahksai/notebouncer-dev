@@ -1,0 +1,102 @@
+// NoteBouncer backend schema (v0.3 — FE/BE split)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String       @id @default(cuid())
+  zoomUserId      String       @unique
+  zoomAccountId   String
+  email           String
+  displayName     String?
+  installedAt     DateTime     @default(now())
+  deauthorizedAt  DateTime?
+
+  oauthToken      OauthToken?
+  config          Config?
+  meetings        Meeting[]
+  auditLogs       AuditLog[]
+
+  @@map("users")
+}
+
+model OauthToken {
+  userId             String   @id
+  accessTokenCipher  String
+  refreshTokenCipher String
+  expiresAt          DateTime
+  scope              String
+  updatedAt          DateTime @updatedAt
+
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("oauth_tokens")
+}
+
+// Per-user detection settings. Created with defaults on OAuth callback.
+model Config {
+  userId                String   @id
+  enabled               Boolean  @default(true)
+  defaultMode           String   @default("remove") // "remove" | "waiting_room"
+  allowlistNames        String[] @default([])
+  customBlocklistNames  String[] @default([])
+  dryRun                Boolean  @default(false)
+  updatedAt             DateTime @updatedAt
+
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("configs")
+}
+
+// One row per (user, meetingUuid). Written on the first webhook seen for a
+// meeting. modeOverride allows per-meeting overrides of the user's default.
+model Meeting {
+  id            BigInt   @id @default(autoincrement())
+  userId        String
+  meetingUuid   String
+  modeOverride  String?
+  createdAt     DateTime @default(now())
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, meetingUuid])
+  @@map("meetings")
+}
+
+model AuditLog {
+  id                BigInt   @id @default(autoincrement())
+  userId            String
+  meetingId         String
+  meetingUuid       String?
+  participantName   String?
+  participantEmail  String?
+  participantZoomId String?
+  matchReason       String
+  // action: "detected" | "removed" | "remove_failed" | "moved_to_waiting_room" | "dry_run"
+  action            String
+  latencyMs         Int?
+  // source: "webhook" (passive detection) | "sidebar" (in-client active removal)
+  source            String
+  errorMessage      String?
+  createdAt         DateTime @default(now())
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("audit_log")
+}
+
+// Dedup table for Zoom webhook event IDs. Not FK'd to users — kept long enough
+// to outlast Zoom's retry window so we don't process the same event twice.
+model WebhookEvent {
+  zoomEventId  String   @id
+  receivedAt   DateTime @default(now())
+
+  @@map("webhook_events")
+}
